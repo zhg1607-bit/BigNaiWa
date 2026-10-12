@@ -1,138 +1,82 @@
 /* ============================================================
- *  合成大奶娃 · 排行榜
- *  基于 TinyWebDB 的 REST 接口（客户端直连，无自建后端）。
- *  成绩 tag = "dnw_<时间>_<随机>"，value = {"n":昵称,"s":分数,"t":时间戳}
- *  榜单内容 = 最近 20 次提交（服务端按提交时间倒序返回，取前两页即可覆盖）。
- *  只读不写别人的数据：不做任何删除，旧成绩自然被后来的人挤出窗口。
- *  整个模块不依赖游戏内部状态，网络不通也只是排行榜不可用，不影响玩。
+ *  合成大奶娃 · 成绩榜（本机版）
+ *  每打完一局就把这一局的成绩记进 localStorage，数据只留在这台手机上，不联网。
+ *  记录格式：{ id, n:昵称, s:分数, t:时间戳 }
+ *  榜单 = 本机留存的每一局成绩，按分数从高到低排；同分时先打出来的排前面。
+ *  只保留最近 MAX_KEEP 局，避免本地存储无限膨胀。
+ *  整个模块不碰游戏内部状态；localStorage 写不进去也只是这一局没记上，不影响玩。
  * ============================================================ */
 (function () {
   'use strict';
 
-  /* ---- 端点与凭据（字节表存放，运行时还原） ---- */
-  var _k = [90, 60, 145, 39];
-  function _x(h) {
-    var s = '', i, c;
-    for (i = 0; i < h.length; i += 2) {
-      c = parseInt(h.substr(i, 2), 16) ^ _k[(i >> 1) & 3];
-      s += String.fromCharCode(c);
-    }
-    return s;
-  }
-  var API = _x('3248e5572906be082e55ff5e2d59f3433812f0572a55ff513f52e548' +
-               '2812e2573b5ff4083b4cf8');
-  var USER = _x('3e5dff46334bf0');
-  var SECRET = _x('6c5aa4156f0da944');
-  var PREFIX = _x('3e52e678');
-
-  const NAME_KEY = 'danaiwa.name';
-  const DEFAULT_NAME = '默认用户';   // 没填昵称就用这个
-  const MUTE_MIN_GAP = 3000;        // 两次提交至少间隔 3 秒
-  const MAX_SCORE = 99999999;       // 明显离谱的成绩直接不收
-  const SCAN_PAGES = 2;             // 榜单只取最近 20 次提交，扫最新两页足够
-  const WINDOW = 20;                // 「最近 N 次提交」这个窗口的大小
+  const STORE_KEY = 'danaiwa.scores.v1';   // 本机成绩历史
+  const NAME_KEY = 'danaiwa.name';         // 昵称（沿用旧键，之前填过的昵称还在）
+  const DEFAULT_NAME = '默认用户';          // 没填昵称就用这个
+  const MAX_SCORE = 99999999;              // 明显离谱的成绩直接不收
+  const MAX_KEEP = 200;                    // 本机最多留最近 N 局
 
   const $ = (id) => document.getElementById(id);
 
   /* ---------------------------------------------------------
-   *  接口
+   *  本机成绩：读 / 写 / 追加
    * ------------------------------------------------------- */
 
-  function post(params) {
-    const body = new URLSearchParams();
-    body.set('user', USER);
-    body.set('secret', SECRET);
-    for (const k in params) body.set(k, params[k]);
-
-    const once = () => fetch(API, { method: 'POST', body: body }).then((res) => {
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.text();
-    }).then((text) => {
-      const s = (text || '').trim();
-      if (!s) return {};
-      try {
-        return JSON.parse(s);
-      } catch (e) {
-        throw new Error('服务器返回看不懂：' + s.slice(0, 60));
-      }
-    });
-
-    /* 这个免费接口时不时抽风返 502，歇一下重试一次再算失败 */
-    return once().catch((err) => new Promise((r) => setTimeout(r, 700)).then(once).catch(() => {
-      throw err;
-    }));
+  /* 一条记录只认「分数是 0 ~ MAX_SCORE 的数字」，别的当坏数据丢掉 */
+  function fix(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const s = Number(raw.s);
+    if (!isFinite(s) || s < 0 || s > MAX_SCORE) return null;
+    const t = Number(raw.t);
+    return {
+      id: String(raw.id || (isFinite(t) && t > 0 ? t : Math.random().toString(36).slice(2))),
+      n: String(raw.n || DEFAULT_NAME).slice(0, 12),
+      s: s,
+      t: isFinite(t) && t > 0 ? t : 0
+    };
   }
 
-  function addScore(name, score) {
-    const tag = PREFIX + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6);
-    const value = JSON.stringify({ n: name, s: score, t: Date.now() });
-    return post({ action: 'update', tag: tag, value: value });
-  }
-
-  /* 读榜：服务端是按提交时间倒序返回的，取最新 SCAN_PAGES 页就够覆盖最近 20 次提交 */
-  function searchRecent() {
-    const out = {};
-    let no = 1, page = 0;
-
-    function step() {
-      return post({
-        action: 'search', no: String(no), count: '100',
-        tag: PREFIX, type: 'both'
-      }).then((obj) => {
-        const keys = [];
-        for (const k in obj) {
-          if (k.indexOf(PREFIX) === 0 && typeof obj[k] === 'string') keys.push(k);
-        }
-        for (let i = 0; i < keys.length; i++) out[keys[i]] = obj[keys[i]];
-        page++;
-        if (page < SCAN_PAGES) {
-          no += 100;
-          return step();
-        }
-        return out;
-      });
+  function loadAll() {
+    let arr;
+    try {
+      arr = JSON.parse(localStorage.getItem(STORE_KEY) || '[]');
+    } catch (e) {
+      return [];            // 存坏了当没有，不打断玩家
     }
-    return step();
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    for (let i = 0; i < arr.length; i++) {
+      const rec = fix(arr[i]);
+      if (rec) out.push(rec);
+    }
+    return out;
   }
 
-  /* 提交时间：优先用记录里的 t，没有就从 tag 里的时间戳还原。
-     早期版本有的 tag 写的是毫秒十进制，这里一并兼容。 */
-  function stampOf(tag, rec) {
-    const t = Number(rec && rec.t);
-    if (isFinite(t) && t > 0) return t;
-    const mid = String(tag).split('_')[1] || '';
-    if (/^\d{12,}$/.test(mid)) return Number(mid);
-    const s = parseInt(mid, 36);
-    return isFinite(s) ? s : 0;
+  /* 存不进去（无痕模式 / 存满）会抛错，由调用方提示一句 */
+  function saveAll(list) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(list));
   }
 
-  /* 榜单 = 最近 WINDOW 次提交，再按分数排个序给大家看 */
+  function addRecord(name, score) {
+    const rec = {
+      id: Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6),
+      n: cleanName(name) || DEFAULT_NAME,
+      s: Number(score) || 0,
+      t: Date.now()
+    };
+    const list = loadAll();
+    list.push(rec);
+    /* 超过上限就从最老的那局开始丢 */
+    if (list.length > MAX_KEEP) {
+      list.sort((a, b) => a.t - b.t);
+      list.splice(0, list.length - MAX_KEEP);
+    }
+    saveAll(list);
+    return rec;
+  }
+
+  /* 榜单数据：本机每一局成绩，分数高的在前；同分先打出来的在前 */
   function fetchTop() {
-    return searchRecent().then((obj) => {
-      const all = [];
-      for (const tag in obj) {
-        const raw = obj[tag];
-        if (typeof raw !== 'string') continue;
-        let rec;
-        try { rec = JSON.parse(raw); } catch (e) { continue; }
-        const s = Number(rec && rec.s);
-        if (!isFinite(s) || s < 0 || s > MAX_SCORE) continue;
-        all.push({
-          tag: tag,
-          name: String((rec && rec.n) || '匿名玩家').slice(0, 16),
-          score: s,
-          t: stampOf(tag, rec)
-        });
-      }
-
-      /* 先按提交时间取最近的 WINDOW 条 */
-      all.sort((a, b) => (b.t - a.t) || (b.tag > a.tag ? 1 : -1));
-      const fresh = all.slice(0, WINDOW);
-
-      /* 再在这个窗口里按分数排名 */
-      fresh.sort((a, b) => (b.score - a.score) || (b.t - a.t));
-      return fresh;
-    });
+    return loadAll().sort((a, b) => (b.s - a.s) || (a.t - b.t));
   }
 
   /* ---------------------------------------------------------
@@ -154,7 +98,7 @@
     try { localStorage.setItem(NAME_KEY, n); } catch (e) { /* 忽略 */ }
   }
 
-  /* 实际提交用的昵称：没填就用「默认用户」 */
+  /* 实际记录用的昵称：没填就用「默认用户」 */
   function myName() {
     return loadName() || DEFAULT_NAME;
   }
@@ -170,10 +114,10 @@
   const nameLabel = $('myNameLabel');
   const submitBtn = $('submitBtn');
   const submitBox = $('submitBox');
+  const noteEl = $('boardNote');
 
-  let lastSubmitAt = 0;
-  let submitting = false;
-  let pendingScore = 0;          // 本局分数（结算/重试用）
+  let pendingScore = 0;   // 本局分数（记录/重试用）
+  let lastId = null;      // 刚记上的那一条，用来高亮
 
   function setMsg(text, kind) {
     if (!msgEl) return;
@@ -205,14 +149,30 @@
     return i === 0 ? 'r1' : i === 1 ? 'r2' : i === 2 ? 'r3' : '';
   }
 
-  function renderBoard(rows, myScore) {
+  function pad2(n) {
+    return n < 10 ? '0' + n : String(n);
+  }
+
+  /* 每局的时间：本机榜单靠它区分「哪一局」，比重复出现的昵称有用 */
+  function stampText(t) {
+    if (!t) return '';
+    const d = new Date(t);
+    return pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' +
+           pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function renderBoard(rows, myId) {
     if (!listEl) return;
     listEl.textContent = '';
+    if (noteEl) {
+      noteEl.textContent = rows.length
+        ? '本机共 ' + rows.length + ' 局成绩，按分数从高到低排'
+        : '成绩只存在本机，不会上传';
+    }
     if (!rows.length) {
-      boardMessage('最近还没有人提交，快去玩一局！');
+      boardMessage('还没有成绩，先玩一局吧！');
       return;
     }
-    let marked = false;
     rows.forEach((row, i) => {
       const line = document.createElement('div');
       line.className = 'board-row ' + rankClass(i);
@@ -223,41 +183,34 @@
 
       const name = document.createElement('span');
       name.className = 'board-name';
-      name.textContent = row.name;
+      name.textContent = stampText(row.t);
 
       const score = document.createElement('span');
       score.className = 'board-score';
-      score.textContent = row.score;
+      score.textContent = row.s;
 
       line.appendChild(rank);
       line.appendChild(name);
       line.appendChild(score);
 
-      // 高亮自己刚提交的那一条（同分且还没标记过）
-      if (!marked && myScore != null && row.score === myScore) {
-        line.classList.add('is-mine');
-        marked = true;
-      }
+      // 高亮刚打完的那一局
+      if (myId != null && row.id === myId) line.classList.add('is-mine');
+
       listEl.appendChild(line);
     });
   }
 
-  function refreshBoard(myScore) {
-    boardMessage('正在读取排行榜…');
-    return fetchTop().then((rows) => {
-      renderBoard(rows, myScore);
-      return rows;
-    }).catch((err) => {
-      boardMessage('读取失败：' + err.message + '（检查一下网络？）');
-      throw err;
-    });
+  function refreshBoard(myId) {
+    const rows = fetchTop();
+    renderBoard(rows, myId);
+    return rows;
   }
 
   function openBoard() {
     if (!modal) return;
     modal.classList.add('show');
     modal.setAttribute('aria-hidden', 'false');
-    refreshBoard(null).catch(() => { /* 已经提示过了 */ });
+    refreshBoard(lastId);
   }
 
   function closeBoard() {
@@ -267,44 +220,31 @@
   }
 
   /* ---------------------------------------------------------
-   *  结算 / 提交
+   *  结算 / 记录
    * ------------------------------------------------------- */
 
-  /* 真正写库 */
-  function pushScore(name, score, viaRetry) {
-    if (submitting) return Promise.resolve(false);
-    if (!viaRetry) {
-      const now = Date.now();
-      if (now - lastSubmitAt < MUTE_MIN_GAP) {
-        setMsg('刚提交过啦，稍等一下', 'bad');
-        return Promise.resolve(false);
-      }
-    }
-    submitting = true;
+  /* 真正落到本机 */
+  function pushScore(name, score) {
     showRetry(false);
-    setMsg('正在提交…', '');
-
-    return addScore(name, score).then(() => {
-      lastSubmitAt = Date.now();
-      setMsg('已上榜 ✓　' + name + ' · ' + score + ' 分', 'good');
-      return refreshBoard(score).then(() => true, () => true);
-    }).catch((err) => {
-      setMsg('提交失败：' + err.message, 'bad');
+    try {
+      const rec = addRecord(name, score);
+      lastId = rec.id;
+      setMsg('已记录 ✓　本局 ' + score + ' 分', 'good');
+      return true;
+    } catch (err) {
+      setMsg('没能存到本机：' + (err && err.message ? err.message : '存储不可用'), 'bad');
       showRetry(true);
       return false;
-    }).then((ok) => {
-      submitting = false;
-      return ok;
-    });
+    }
   }
 
-  /* 手动重试（只在自动提交失败后出现） */
+  /* 手动重试（只在本地写入失败后出现） */
   function retry() {
     if (!pendingScore) return;
-    pushScore(myName(), pendingScore, true);
+    if (pushScore(myName(), pendingScore)) pendingScore = 0;
   }
 
-  /* 打完一局：直接结算上榜（榜单是最近 WINDOW 次提交，谁都能进） */
+  /* 打完一局：把这一局的成绩记进本机 */
   function onGameOver(score) {
     if (!submitBox) return;
     pendingScore = Number(score) || 0;
@@ -316,8 +256,7 @@
       return;
     }
     submitBox.style.display = '';
-    setMsg('正在结算…', '');
-    pushScore(myName(), pendingScore, true);
+    if (pushScore(myName(), pendingScore)) pendingScore = 0;
   }
 
   /* ---------------------------------------------------------
@@ -335,9 +274,7 @@
     if (closeBtn) closeBtn.addEventListener('click', closeBoard);
 
     const refreshBtn = $('boardRefresh');
-    if (refreshBtn) refreshBtn.addEventListener('click', () => {
-      refreshBoard(null).catch(() => {});
-    });
+    if (refreshBtn) refreshBtn.addEventListener('click', () => { refreshBoard(lastId); });
 
     if (modal) {
       modal.addEventListener('click', (e) => {
@@ -389,7 +326,6 @@
     refresh: refreshBoard,
     onGameOver: onGameOver,
     fetchTop: fetchTop,
-    submitScore: addScore,
     myName: myName,
     setName: function (n) { saveName(cleanName(n)); paintName(); },
     hasName: function () { return !!loadName(); }

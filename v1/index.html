@@ -58,11 +58,11 @@
             <p class="my-name">昵称：<strong id="myNameLabel">默认用户</strong>
               <button class="link-btn" id="editNameBtn" type="button">改昵称</button>
             </p>
-            <button class="btn" id="submitBtn" type="button" hidden>重试提交</button>
+            <button class="btn" id="submitBtn" type="button" hidden>重试记录</button>
           </div>
 
           <div class="dialog-actions">
-            <button class="btn" id="boardBtn2" type="button">🏆 排行榜</button>
+            <button class="btn" id="boardBtn2" type="button">🏆 成绩榜</button>
             <button class="btn btn-primary" id="restartBtn" type="button">再来一局</button>
           </div>
           <p class="dialog-hint">按 R 键也可重新开始</p>
@@ -104,7 +104,7 @@
 
     <div class="actions">
       <button class="btn btn-wide" id="boardBtn" type="button">
-        <span class="ico">🏆</span><span class="lbl">排行榜</span>
+        <span class="ico">🏆</span><span class="lbl">成绩榜</span>
       </button>
       <button class="btn" id="soundBtn" type="button" aria-pressed="true">
         <span class="ico">🔊</span><span class="lbl">音效开</span>
@@ -124,11 +124,11 @@
 
 </main>
 
-<!-- ===== 排行榜弹窗 ===== -->
-<div class="modal" id="boardModal" aria-hidden="true" role="dialog" aria-label="排行榜">
+<!-- ===== 成绩榜弹窗 ===== -->
+<div class="modal" id="boardModal" aria-hidden="true" role="dialog" aria-label="成绩榜">
   <div class="modal-card">
     <header class="modal-head">
-      <h2>🏆 最近高手榜</h2>
+      <h2>🏆 我的成绩榜</h2>
       <button class="icon-btn" id="boardClose" type="button" aria-label="关闭">✕</button>
     </header>
     <div class="nick-row">
@@ -138,7 +138,7 @@
     </div>
     <div class="board-list" id="boardList"></div>
     <footer class="modal-foot">
-      <span class="board-note">只取最近 20 次提交，成绩会被后来的人挤下去</span>
+      <span class="board-note" id="boardNote">成绩只存在本机，不会上传</span>
       <button class="btn" id="boardRefresh" type="button">刷新</button>
     </footer>
   </div>
@@ -149,7 +149,7 @@
 <!-- 极模糊占位图（内联 data URL，由 tools/make_blur.py 产出）：贴图没到位时先画它 -->
 <script src="assets/fruits/blur.js"></script>
 <script src="game.js"></script>
-<!-- 排行榜 -->
-<script src="leaderboard.min.js"></script>
+<!-- 成绩榜（本机 localStorage，不联网） -->
+<script src="leaderboard.js"></script>
 </body>
 </html>
